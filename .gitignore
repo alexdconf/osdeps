@@ -23,3 +23,9 @@ go.work.sum
 
 # env file
 .env
+
+# bigfile
+bigfile.txt
+
+# builds
+cmd/osdeps-cli/osdeps-cli
