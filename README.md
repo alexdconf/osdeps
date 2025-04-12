@@ -16,3 +16,6 @@ This tool could be expanded to support Windows and JavaScript (Node.js).
 
 # Build
 Navigate to cmd/osdeps-cli/ and execute `go build`.
+
+# Usage
+`./osdeps-cli --os darwin --env-path /path/to/.venv`
