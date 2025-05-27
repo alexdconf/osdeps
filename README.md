@@ -13,3 +13,9 @@ I wanted to build a tool to help with deploying software to cloud environments. 
 
 # Moving Forward
 This tool could be expanded to support Windows and JavaScript (Node.js).
+
+# Build
+Navigate to cmd/osdeps-cli/ and execute `go build`.
+
+# Usage
+`./osdeps-cli --os darwin --env-path /path/to/.venv`
