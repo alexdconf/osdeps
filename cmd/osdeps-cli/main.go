@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/alexdconf/osdeps/pkg/analyzer"
 	"github.com/alexdconf/osdeps/pkg/config"
@@ -24,7 +25,8 @@ func main() {
 	envType := flag.String("env-type", "python-venv", "Type of environment ('python-venv')")
 	targetOS := flag.String("os", "linux", "Target operating system ('linux')")
 	outputFormat := flag.String("output-format", "list", "Output format ('list', 'json')")
-	filterLevel := flag.String("filter-level", "basic", "Level of standard library filtering ('basic', 'none')")
+	workers := flag.Int("workers", -1, "Number of worker goroutines to use for dependency analysis (-1 for auto-detect)")
+	debug := flag.Bool("debug", false, "Show all dependencies before filtering")
 	// Add flags for architecture if needed in the future, e.g., targetArch
 
 	flag.Parse()
@@ -43,16 +45,6 @@ func main() {
 	log.Printf("Starting scan for environment: %s (Type: %s, OS: %s)", absEnvPath, *envType, *targetOS)
 
 	// --- Configuration ---
-	// Load configuration (including filter lists)
-	// For now, using a default basic filter for Linux
-	cfg := config.DefaultConfig()
-	if *filterLevel == "none" {
-		cfg.IgnoreLists[*targetOS] = []string{} // Clear ignore list if filter level is none
-	} else if _, ok := cfg.IgnoreLists[*targetOS]; !ok {
-		log.Printf("Warning: No basic filter list defined for OS '%s'. No filtering applied.", *targetOS)
-		cfg.IgnoreLists[*targetOS] = []string{}
-	}
-
 	// --- Select Scanner ---
 	var envScanner scanner.Scanner
 	switch *envType {
@@ -80,13 +72,12 @@ func main() {
 	}
 	if len(artifacts) == 0 {
 		log.Println("No compiled artifacts found to analyze.")
-		os.Exit(0)
 	}
+
 	log.Printf("Found %d potential artifacts.", len(artifacts))
 
-	// --- Select Parser & Parse Artifacts ---
+	// Parse artifacts for dependencies
 	log.Println("Parsing artifacts for dependencies...")
-	allRawDependencies := make([][]string, 0, len(artifacts))
 	var artifactParser parser.Parser
 
 	// Select parser based on OS (extend this for cross-platform)
@@ -99,65 +90,89 @@ func main() {
 	case "darwin": // <-- Add this case for macOS
 		parserPath := filepath.Join(basePkgDir, "parser", "macho_parser.go") // Placeholder path
 		log.Printf("Using MachOParser (source assumed near %s)", parserPath)
-		artifactParser = parser.NewMachOParser() // Use the new parser
-	// case "windows":
-	//  artifactParser = parser.NewPEParser() // Future implementation
+		artifactParser = parser.NewMachOParser()
 	default:
-		log.Fatalf("Error: Unsupported OS '%s' for parsing", *targetOS)
+		log.Fatalf("Error: Unsupported OS '%s'", *targetOS)
 		os.Exit(1)
 	}
 
-	// Parse each artifact
-	parsedCount := 0
-	skippedCount := 0
-	for _, artifact := range artifacts {
-		// Basic check if artifact OS matches target OS (can be refined)
-		if artifact.OS != *targetOS {
-			log.Printf("Skipping artifact %s (OS mismatch: %s != %s)", filepath.Base(artifact.Path), artifact.OS, *targetOS)
-			skippedCount++
-			continue
-		}
+	allRawDependencies := make([][]string, 0)
 
-		// log.Printf("Parsing: %s", filepath.Base(artifact.Path)) // Can be verbose
+	for _, artifact := range artifacts {
 		deps, err := artifactParser.ParseDependencies(artifact.Path)
 		if err != nil {
-			// Log non-fatal parsing errors (e.g., wrong format, permissions)
-			// Don't stop the whole process unless it's critical
-			log.Printf("Warning: Could not parse dependencies for %s: %v", filepath.Base(artifact.Path), err)
-			continue // Skip this artifact
+			log.Printf("Error parsing %s: %v", artifact.Path, err)
+			continue
 		}
-		if len(deps) > 0 {
-			allRawDependencies = append(allRawDependencies, deps)
-			parsedCount++
+		allRawDependencies = append(allRawDependencies, deps)
+	}
+
+	log.Printf("Successfully parsed %d artifacts, skipped %d.", len(artifacts), len(artifacts)-len(allRawDependencies))
+
+	// Analyze dependencies using worker pool
+	log.Println("Analyzing dependencies...")
+	artifactPaths := make([]string, len(artifacts))
+	for i, artifact := range artifacts {
+		artifactPaths[i] = artifact.Path
+	}
+	wp := analyzer.NewWorkerPool(artifactPaths, config.DefaultConfig(), *targetOS, *workers)
+	depsChan := wp.Start()
+
+	// Collect dependencies from all workers and deduplicate
+	depsMap := make(map[string]bool)
+	for deps := range depsChan {
+		for _, dep := range deps {
+			depsMap[dep] = true
 		}
 	}
-	log.Printf("Successfully parsed %d artifacts, skipped %d.", parsedCount, skippedCount)
 
-	// --- Analyze Dependencies ---
-	log.Println("Analyzing and filtering dependencies...")
-	// Construct path relative to where the executable might be run from
-	analyzerPath := filepath.Join(basePkgDir, "analyzer", "analyzer.go") // Placeholder path
-	log.Printf("Using Analyzer (source assumed near %s)", analyzerPath)
-	finalDependencies := analyzer.AnalyzeDependencies(allRawDependencies, cfg, *targetOS)
-	log.Printf("Found %d unique, non-standard OS dependencies.", len(finalDependencies))
+	// Convert map keys back to slice
+	allDeps := make([]string, 0, len(depsMap))
+	for dep := range depsMap {
+		allDeps = append(allDeps, dep)
+	}
 
-	// --- Output Results ---
+	sort.Strings(allDeps)
+
+	log.Printf("Found %d unique dependencies.", len(allDeps))
+
+	// Print dependencies
+	log.Println("\nDependencies:")
+	for _, dep := range allDeps {
+		log.Printf("- %s", dep)
+	}
+
+	// Format output
 	log.Println("Formatting output...")
-	// Construct path relative to where the executable might be run from
-	outputPath := filepath.Join(basePkgDir, "output", "output.go") // Placeholder path
-	log.Printf("Using Output formatter (source assumed near %s)", outputPath)
-	outputString, err := output.Format(finalDependencies, *outputFormat)
-	if err != nil {
-		log.Fatalf("Error formatting output: %v", err)
-		os.Exit(1)
+
+	// Format and print dependencies
+	fmt.Println("\n--- OS Dependencies ---")
+	if len(allDeps) > 0 {
+		outputString, err := output.Format(allDeps, *outputFormat)
+		if err != nil {
+			log.Fatalf("Error formatting output: %v", err)
+			os.Exit(1)
+		}
+		fmt.Println(outputString)
+	} else {
+		fmt.Println("(None identified)")
 	}
 
-	// Print final result to stdout
-	fmt.Println("\n--- Required OS Libraries ---")
-	if outputString == "" && *outputFormat == "list" {
-		fmt.Println("(None identified)")
-	} else {
+	// If debug mode is enabled, show all raw dependencies
+	if *debug {
+		fmt.Println("\n--- All Raw Dependencies ---")
+		var allRawDeps []string
+		for _, deps := range allRawDependencies {
+			allRawDeps = append(allRawDeps, deps...)
+		}
+		sort.Strings(allRawDeps)
+		outputString, err := output.Format(allRawDeps, *outputFormat)
+		if err != nil {
+			log.Fatalf("Error formatting output: %v", err)
+			os.Exit(1)
+		}
 		fmt.Println(outputString)
 	}
+
 	log.Println("Scan complete.")
 }
