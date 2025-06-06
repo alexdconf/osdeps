@@ -19,3 +19,4 @@ Navigate to cmd/osdeps-cli/ and execute `go build`.
 
 # Usage
 `./osdeps-cli --os darwin --env-path /path/to/.venv`
+`./osdeps-cli --os darwin --env-path /path/to/.venv --output-format json --debug true`
